@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: visualequ-db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-visualequ}
+      POSTGRES_USER: ${DB_USER:-visualequ_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_this_password}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-visualequ_user} -d ${DB_NAME:-visualequ}"]
+      interval: 10s
+      retries: 5
+      timeout: 5s
+
+  django-engine:
+    build: 
+      context: ./backend-django
+      dockerfile: Dockerfile
+    container_name: visualequ-django
+    environment:
+      DB_NAME: ${DB_NAME:-visualequ}
+      DB_USER: ${DB_USER:-visualequ_user}
+      DB_PASSWORD: ${DB_PASSWORD:-change_this_password}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DJANGO_SECRET: ${DJANGO_SECRET:-dev-secret-key-change-in-production}
+      DEBUG: "True"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend-django:/app
+    command: >
+      sh -c "python manage.py makemigrations math_engine &&
+             python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+
+  node-auth:
+    build:
+      context: ./backend-node
+      dockerfile: Dockerfile
+    container_name: visualequ-node
+    environment:
+      DB_NAME: ${DB_NAME:-visualequ}
+      DB_USER: ${DB_USER:-visualequ_user}
+      DB_PASSWORD: ${DB_PASSWORD:-change_this_password}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-in-production}
+      DJANGO_API_URL: http://django-engine:8000
+      PORT: 3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend-node:/app
+      - /app/node_modules
+
+  react-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: visualequ-react
+    environment:
+      VITE_NODE_API_URL: http://localhost:3001
+      VITE_DJANGO_API_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      - node-auth
+      - django-engine
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:
+    driver: local
