@@ -5,7 +5,7 @@
  * Protected route - requires authentication
  */
 
-import React, { useState, useCallback } from 'react'
+import React, { useState, useCallback, useEffect } from 'react'
 import Canvas from '../components/Canvas'
 import ExpressionInput from '../components/ExpressionInput'
 import Sidebar from '../components/Sidebar'
@@ -13,18 +13,16 @@ import { mathAPI } from '../api'
 
 function Graph({ user, onLogout }) {
   const [equations, setEquations] = useState([
-    { 
-      id: 1, 
-      expression: 'sin(x)', 
-      color: '#0d6efd', 
+    {
+      id: 1,
+      expression: 'sin(x)',
+      color: '#0d6efd',
       visible: true,
-      sliderVars: {}
+      points: null,
     }
   ])
   const [activeEquationId, setActiveEquationId] = useState(1)
   const [isEvaluating, setIsEvaluating] = useState(false)
-
-  const getActiveEquation = () => equations.find(eq => eq.id === activeEquationId)
 
   const evaluateEquation = useCallback(async (equation) => {
     setIsEvaluating(true)
@@ -33,17 +31,28 @@ function Graph({ user, onLogout }) {
         expression: equation.expression,
         xMin: -10,
         xMax: 10,
-        steps: 500
+        steps: 500,
       })
-      
-      setEquations(prev => prev.map(eq => 
-        eq.id === equation.id ? { ...eq, points: response.data.points } : eq
+
+      const points = response.data.points
+      if (!points || points.length === 0) {
+        console.warn('evaluate returned empty points for:', equation.expression, response.data)
+      }
+
+      setEquations(prev => prev.map(eq =>
+        eq.id === equation.id ? { ...eq, points } : eq
       ))
     } catch (error) {
       console.error('Evaluation failed:', error.message)
     } finally {
       setIsEvaluating(false)
     }
+  }, [])
+
+  // Evaluate the default equation on first mount
+  useEffect(() => {
+    evaluateEquation(equations[0])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const addEquation = (expression) => {
@@ -54,23 +63,31 @@ function Graph({ user, onLogout }) {
       expression,
       color: colors[equations.length % colors.length],
       visible: true,
-      sliderVars: {}
+      points: null,
     }
-    setEquations([...equations, newEquation])
+    setEquations(prev => [...prev, newEquation])
     setActiveEquationId(newId)
     evaluateEquation(newEquation)
   }
 
   const toggleVisibility = (id) => {
-    setEquations(prev => prev.map(eq => 
+    setEquations(prev => prev.map(eq =>
       eq.id === id ? { ...eq, visible: !eq.visible } : eq
     ))
   }
 
   const updateColor = (id, color) => {
-    setEquations(prev => prev.map(eq => 
+    setEquations(prev => prev.map(eq =>
       eq.id === id ? { ...eq, color } : eq
     ))
+  }
+
+  const deleteEquation = (id) => {
+    setEquations(prev => prev.filter(eq => eq.id !== id))
+    if (activeEquationId === id) {
+      const remaining = equations.filter(eq => eq.id !== id)
+      if (remaining.length > 0) setActiveEquationId(remaining[0].id)
+    }
   }
 
   return (
@@ -81,7 +98,6 @@ function Graph({ user, onLogout }) {
           <span className="navbar-brand">
             <span className="text-primary">Visual</span>equ
           </span>
-          
           <div className="d-flex align-items-center">
             <span className="text-light me-3">{user?.username}</span>
             <button className="btn btn-outline-light btn-sm" onClick={onLogout}>
@@ -93,32 +109,21 @@ function Graph({ user, onLogout }) {
 
       {/* Main Content */}
       <div className="flex-grow-1 d-flex">
-        {/* Sidebar */}
         <Sidebar
           equations={equations}
           activeEquationId={activeEquationId}
           onSelectEquation={setActiveEquationId}
           onToggleVisibility={toggleVisibility}
           onUpdateColor={updateColor}
-          onDeleteEquation={(id) => {
-            setEquations(prev => prev.filter(eq => eq.id !== id))
-            if (activeEquationId === id) {
-              const remaining = equations.filter(eq => eq.id !== id)
-              if (remaining.length > 0) {
-                setActiveEquationId(remaining[0].id)
-              }
-            }
-          }}
+          onDeleteEquation={deleteEquation}
         />
 
-        {/* Graph Area */}
         <div className="flex-grow-1 position-relative bg-white">
-          <Canvas 
+          <Canvas
             equations={equations.filter(eq => eq.visible)}
             isEvaluating={isEvaluating}
           />
-          
-          <ExpressionInput 
+          <ExpressionInput
             onAddEquation={addEquation}
             isEvaluating={isEvaluating}
           />

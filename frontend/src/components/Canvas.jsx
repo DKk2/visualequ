@@ -1,245 +1,315 @@
 /**
  * Canvas 2D Rendering Component
  * Handles:
- * - World-to-screen coordinate transformations
+ * - World-to-screen coordinate transformations via viewport
  * - Pan and zoom interactions (mouse wheel + drag)
- * - Adaptive sampling for smooth curves
- * - Proper handling of undefined y-values (asymptotes)
  * - Grid rendering with axis labels
+ * - Equation curve rendering with asymptote / discontinuity detection
  */
 
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 
 function Canvas({ equations, isEvaluating }) {
   const canvasRef = useRef(null)
-  const [transform, setTransform] = useState({
-    offsetX: 0,
-    offsetY: 0,
-    scale: 50, // pixels per unit
+  const [canvasSize, setCanvasSize] = useState({ width: 800, height: 600 })
+
+  // Viewport in world coordinates
+  const [viewport, setViewport] = useState({
+    xMin: -10,
+    xMax: 10,
+    yMin: -7.5,
+    yMax: 7.5,
   })
-  const [isDragging, setIsDragging] = useState(false)
-  const dragStartRef = useRef({ x: 0, y: 0 })
-  const transformRef = useRef(transform)
 
-  // Keep transformRef in sync
-  useEffect(() => {
-    transformRef.current = transform
-  }, [transform])
+  const viewportRef = useRef(viewport)
+  useEffect(() => { viewportRef.current = viewport }, [viewport])
 
-  const worldToScreen = useCallback((wx, wy) => {
-    const { offsetX, offsetY, scale } = transformRef.current
-    const canvas = canvasRef.current
-    if (!canvas) return [0, 0]
-    
-    return [
-      (wx * scale) + canvas.width / 2 + offsetX,
-      canvas.height / 2 - (wy * scale) + offsetY
-    ]
-  }, [])
+  const isDragging = useRef(false)
+  const dragStart = useRef({ x: 0, y: 0 })
+  const dragViewport = useRef(viewport)
 
-  const screenToWorld = useCallback((sx, sy) => {
-    const { offsetX, offsetY, scale } = transformRef.current
-    const canvas = canvasRef.current
-    if (!canvas) return [0, 0]
-    
-    return [
-      (sx - canvas.width / 2 - offsetX) / scale,
-      (canvas.height / 2 + offsetY - sy) / scale
-    ]
-  }, [])
+  // ── Coordinate transforms ────────────────────────────────────────────────
+  const toScreenX = useCallback((wx, vp, w) =>
+    (wx - vp.xMin) / (vp.xMax - vp.xMin) * w,
+    []
+  )
 
-  // Draw everything
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
+  const toScreenY = useCallback((wy, vp, h) =>
+    (1 - (wy - vp.yMin) / (vp.yMax - vp.yMin)) * h,
+    []
+  )
 
-    const ctx = canvas.getContext('2d')
-    const { width, height } = canvas
+  // ── Drawing helpers ──────────────────────────────────────────────────────
+  const formatLabel = (val) => {
+    const s = parseFloat(val.toFixed(2)).toString()
+    return s
+  }
 
-    // Clear canvas
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, width, height)
+  const drawGrid = useCallback((ctx, vp, w, h) => {
+    const xRange = vp.xMax - vp.xMin
+    const yRange = vp.yMax - vp.yMin
 
-    // Draw grid
-    drawGrid(ctx, width, height, transform)
+    // Adaptive grid step
+    const rawStep = Math.pow(10, Math.floor(Math.log10(xRange / 8)))
+    const gridStep = rawStep > 0 ? rawStep : 1
 
-    // Draw each equation
-    equations.forEach(eq => {
-      if (eq.visible && eq.points) {
-        drawEquation(ctx, eq, width, height, worldToScreen)
-      }
-    })
-
-    // Draw loading indicator
-    if (isEvaluating) {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)'
-      ctx.font = '14px Arial'
-      ctx.fillText('Evaluating...', 10, 20)
-    }
-  }, [equations, transform, isEvaluating, worldToScreen])
-
-  const drawGrid = (ctx, width, height, transform) => {
-    const { offsetX, offsetY, scale } = transform
-    const centerX = width / 2 + offsetX
-    const centerY = height / 2 + offsetY
-
-    ctx.strokeStyle = '#e0e0e0'
+    // ── Grid lines ──
+    ctx.setLineDash([1, 3])
+    ctx.strokeStyle = '#cccccc'
     ctx.lineWidth = 0.5
 
     // Vertical grid lines
-    const gridSpacing = scale >= 20 ? 1 : scale >= 10 ? 2 : 5
-    const startX = -Math.ceil(centerX / (scale * gridSpacing)) * gridSpacing
-    const endX = Math.ceil((width - centerX) / (scale * gridSpacing)) * gridSpacing
-
-    for (let x = startX; x <= endX; x += gridSpacing) {
-      const [sx] = worldToScreen(x, 0)
+    const xStart = Math.ceil(vp.xMin / gridStep) * gridStep
+    for (let x = xStart; x <= vp.xMax + gridStep * 0.001; x += gridStep) {
+      const sx = toScreenX(x, vp, w)
       ctx.beginPath()
       ctx.moveTo(sx, 0)
-      ctx.lineTo(sx, height)
+      ctx.lineTo(sx, h)
       ctx.stroke()
     }
 
     // Horizontal grid lines
-    const startY = -Math.ceil((height - centerY) / (scale * gridSpacing)) * gridSpacing
-    const endY = Math.ceil(centerY / (scale * gridSpacing)) * gridSpacing
-
-    for (let y = startY; y <= endY; y += gridSpacing) {
-      const [, sy] = worldToScreen(0, y)
+    const yGridStep = Math.pow(10, Math.floor(Math.log10(yRange / 8))) || 1
+    const yStart = Math.ceil(vp.yMin / yGridStep) * yGridStep
+    for (let y = yStart; y <= vp.yMax + yGridStep * 0.001; y += yGridStep) {
+      const sy = toScreenY(y, vp, h)
       ctx.beginPath()
       ctx.moveTo(0, sy)
-      ctx.lineTo(width, sy)
+      ctx.lineTo(w, sy)
       ctx.stroke()
     }
 
-    // Draw axes
+    ctx.setLineDash([])
+
+    // ── Axes ──
     ctx.strokeStyle = '#333333'
     ctx.lineWidth = 1.5
-    ctx.beginPath()
-    ctx.moveTo(0, centerY)
-    ctx.lineTo(width, centerY)
-    ctx.moveTo(centerX, 0)
-    ctx.lineTo(centerX, height)
-    ctx.stroke()
 
-    // Axis labels
-    ctx.fillStyle = '#666666'
-    ctx.font = '10px Arial'
-    ctx.fillText('x', width - 15, centerY - 5)
-    ctx.fillText('y', centerX + 5, 15)
-  }
+    // X-axis (y = 0)
+    if (vp.yMin <= 0 && vp.yMax >= 0) {
+      const sy = toScreenY(0, vp, h)
+      ctx.beginPath()
+      ctx.moveTo(0, sy)
+      ctx.lineTo(w, sy)
+      ctx.stroke()
+    }
 
-  const drawEquation = (ctx, equation, width, height, worldToScreen) => {
-    const points = equation.points
-    if (!points || points.length < 2) return
+    // Y-axis (x = 0)
+    if (vp.xMin <= 0 && vp.xMax >= 0) {
+      const sx = toScreenX(0, vp, w)
+      ctx.beginPath()
+      ctx.moveTo(sx, 0)
+      ctx.lineTo(sx, h)
+      ctx.stroke()
+    }
 
-    ctx.strokeStyle = equation.color || '#0d6efd'
-    ctx.lineWidth = 2
-    ctx.beginPath()
+    // ── Tick labels ──
+    ctx.font = '11px sans-serif'
+    ctx.fillStyle = '#555555'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'top'
 
-    let isFirstPoint = true
-    let previousPoint = null
+    const originSX = toScreenX(0, vp, w)
+    const originSY = toScreenY(0, vp, h)
+    const ORIGIN_SKIP = 18 // px radius around origin to skip label
 
-    for (let i = 0; i < points.length; i++) {
-      const point = points[i]
-      
-      // Skip undefined points (asymptotes)
-      if (point.y === null || point.y === undefined) {
-        isFirstPoint = true
-        continue
-      }
+    // X-axis labels
+    for (let x = xStart; x <= vp.xMax + gridStep * 0.001; x += gridStep) {
+      if (Math.abs(x) < gridStep * 0.001) continue // skip zero on x-axis
+      const sx = toScreenX(x, vp, w)
+      // Skip if too close to origin label area
+      if (Math.abs(sx - originSX) < ORIGIN_SKIP && Math.abs(originSY - h / 2) < ORIGIN_SKIP) continue
+      const labelY = Math.min(Math.max(originSY + 3, 3), h - 16)
+      ctx.fillText(formatLabel(x), sx, labelY)
+    }
 
-      const [sx, sy] = worldToScreen(point.x, point.y)
+    // Y-axis labels
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'middle'
+    for (let y = yStart; y <= vp.yMax + yGridStep * 0.001; y += yGridStep) {
+      if (Math.abs(y) < yGridStep * 0.001) continue // skip zero on y-axis
+      const sy = toScreenY(y, vp, h)
+      const labelX = Math.min(Math.max(originSX - 4, 28), w - 4)
+      ctx.fillText(formatLabel(y), labelX, sy)
+    }
 
-      // Don't draw if off-screen
-      if (sx < -100 || sx > width + 100 || sy < -100 || sy > height + 100) {
-        isFirstPoint = true
-        continue
-      }
+    // Origin "0" label
+    if (vp.xMin <= 0 && vp.xMax >= 0 && vp.yMin <= 0 && vp.yMax >= 0) {
+      ctx.textAlign = 'right'
+      ctx.textBaseline = 'top'
+      ctx.fillText('0', originSX - 4, originSY + 3)
+    }
 
-      if (isFirstPoint) {
-        ctx.moveTo(sx, sy)
-        isFirstPoint = false
-      } else {
-        // Check for large jumps (discontinuities)
-        if (previousPoint) {
-          const dx = Math.abs(sx - previousPoint.x)
-          const dy = Math.abs(sy - previousPoint.y)
-          if (dy > height * 0.8) {
-            ctx.moveTo(sx, sy)
-            previousPoint = { x: sx, y: sy }
-            continue
-          }
+    // Axis name labels
+    ctx.fillStyle = '#333333'
+    ctx.font = 'bold 12px sans-serif'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'middle'
+    ctx.fillText('x', w - 14, Math.min(Math.max(originSY, 12), h - 12))
+    ctx.textAlign = 'center'
+    ctx.fillText('y', Math.min(Math.max(originSX, 12), w - 12), 10)
+  }, [toScreenX, toScreenY])
+
+  const drawEquations = useCallback((ctx, vp, w, h, eqs) => {
+    eqs.forEach(eq => {
+      if (!eq.visible || !eq.points || eq.points.length < 2) return
+
+      ctx.strokeStyle = eq.color || '#0d6efd'
+      ctx.lineWidth = 2
+      ctx.setLineDash([])
+      ctx.beginPath()
+
+      let penDown = false
+      let prevSY = null
+
+      for (let i = 0; i < eq.points.length; i++) {
+        const pt = eq.points[i]
+
+        // Skip asymptotes / undefined values
+        if (pt.y === null || pt.y === undefined || !isFinite(pt.y) || Math.abs(pt.y) > 1e10) {
+          penDown = false
+          prevSY = null
+          continue
         }
-        ctx.lineTo(sx, sy)
+
+        const sx = toScreenX(pt.x, vp, w)
+        const sy = toScreenY(pt.y, vp, h)
+
+        // Large vertical jump → discontinuity, lift pen
+        if (penDown && prevSY !== null && Math.abs(sy - prevSY) > (h * 0.5)) {
+          penDown = false
+        }
+
+        if (!penDown) {
+          ctx.moveTo(sx, sy)
+          penDown = true
+        } else {
+          ctx.lineTo(sx, sy)
+        }
+        prevSY = sy
       }
-      
-      previousPoint = { x: sx, y: sy }
+
+      ctx.stroke()
+    })
+  }, [toScreenX, toScreenY])
+
+  // ── Main draw effect ─────────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    const w = canvas.width
+    const h = canvas.height
+
+    ctx.clearRect(0, 0, w, h)
+
+    // White background
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, w, h)
+
+    drawGrid(ctx, viewport, w, h)
+    drawEquations(ctx, viewport, w, h, equations)
+
+    if (isEvaluating) {
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'
+      ctx.font = '13px sans-serif'
+      ctx.textAlign = 'left'
+      ctx.textBaseline = 'top'
+      ctx.fillText('Evaluating…', 10, 10)
+    }
+  }, [equations, viewport, canvasSize, isEvaluating, drawGrid, drawEquations])
+
+  // ── Resize observer ──────────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const resize = () => {
+      canvas.width = canvas.offsetWidth
+      canvas.height = canvas.offsetHeight
+      setCanvasSize({ width: canvas.width, height: canvas.height })
+
+      // Keep aspect ratio of viewport centred on same world point
+      const cx = (viewportRef.current.xMin + viewportRef.current.xMax) / 2
+      const cy = (viewportRef.current.yMin + viewportRef.current.yMax) / 2
+      const halfW = (viewportRef.current.xMax - viewportRef.current.xMin) / 2
+      const aspect = canvas.height / canvas.width
+      setViewport({
+        xMin: cx - halfW,
+        xMax: cx + halfW,
+        yMin: cy - halfW * aspect,
+        yMax: cy + halfW * aspect,
+      })
     }
 
-    ctx.stroke()
-  }
+    resize()
+    const ro = new ResizeObserver(resize)
+    ro.observe(canvas)
+    return () => ro.disconnect()
+  }, [])
 
-  // Mouse handlers
+  // ── Pan ──────────────────────────────────────────────────────────────────
   const handleMouseDown = (e) => {
-    const rect = canvasRef.current.getBoundingClientRect()
-    dragStartRef.current = {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top
-    }
-    setIsDragging(true)
+    isDragging.current = true
+    dragStart.current = { x: e.clientX, y: e.clientY }
+    dragViewport.current = viewportRef.current
   }
 
   const handleMouseMove = (e) => {
-    if (!isDragging) return
-    const rect = canvasRef.current.getBoundingClientRect()
-    const dx = e.clientX - rect.left - dragStartRef.current.x
-    const dy = e.clientY - rect.top - dragStartRef.current.y
-    
-    setTransform(prev => ({
-      ...prev,
-      offsetX: prev.offsetX + dx,
-      offsetY: prev.offsetY + dy
-    }))
-    
-    dragStartRef.current = {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top
-    }
+    if (!isDragging.current) return
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const dx = e.clientX - dragStart.current.x
+    const dy = e.clientY - dragStart.current.y
+    const vp = dragViewport.current
+    const xRange = vp.xMax - vp.xMin
+    const yRange = vp.yMax - vp.yMin
+    const wx = (dx / canvas.width) * xRange
+    const wy = (dy / canvas.height) * yRange
+
+    setViewport({
+      xMin: vp.xMin - wx,
+      xMax: vp.xMax - wx,
+      yMin: vp.yMin + wy,
+      yMax: vp.yMax + wy,
+    })
   }
 
-  const handleMouseUp = () => setIsDragging(false)
+  const handleMouseUp = () => { isDragging.current = false }
 
+  // ── Zoom ─────────────────────────────────────────────────────────────────
   const handleWheel = (e) => {
     e.preventDefault()
-    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1
-    setTransform(prev => ({
-      ...prev,
-      scale: Math.max(5, Math.min(200, prev.scale * zoomFactor))
-    }))
+    const canvas = canvasRef.current
+    if (!canvas) return
+
+    const rect = canvas.getBoundingClientRect()
+    const mx = e.clientX - rect.left
+    const my = e.clientY - rect.top
+    const vp = viewportRef.current
+    const w = canvas.width
+    const h = canvas.height
+
+    // World coords under cursor
+    const wx = vp.xMin + (mx / w) * (vp.xMax - vp.xMin)
+    const wy = vp.yMax - (my / h) * (vp.yMax - vp.yMin)
+
+    const factor = e.deltaY > 0 ? 1.1 : 0.9
+
+    setViewport({
+      xMin: wx + (vp.xMin - wx) * factor,
+      xMax: wx + (vp.xMax - wx) * factor,
+      yMin: wy + (vp.yMin - wy) * factor,
+      yMax: wy + (vp.yMax - wy) * factor,
+    })
   }
-
-  // Resize handler
-  useEffect(() => {
-    const resizeCanvas = () => {
-      const canvas = canvasRef.current
-      if (canvas) {
-        canvas.width = canvas.offsetWidth
-        canvas.height = canvas.offsetHeight
-        // Force re-render
-        setTransform(prev => ({ ...prev }))
-      }
-    }
-
-    resizeCanvas()
-    window.addEventListener('resize', resizeCanvas)
-    return () => window.removeEventListener('resize', resizeCanvas)
-  }, [])
 
   return (
     <canvas
       ref={canvasRef}
       className="w-100 h-100 d-block"
-      style={{ cursor: isDragging ? 'grabbing' : 'grab' }}
+      style={{ cursor: isDragging.current ? 'grabbing' : 'grab' }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
